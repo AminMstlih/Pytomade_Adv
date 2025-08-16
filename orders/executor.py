@@ -2,6 +2,7 @@
 import math # Add this import at the top if not already there
 from exchange.okx_client import get_public_data, get_private_data, post_private_data
 from bot.logger_config import logger
+from bot import config
 
 # (Other functions remain largely the same until place_order)
 
@@ -71,7 +72,10 @@ def place_order(instId, details):
             logger.warning(f"Sanity check failed after size calculation for {instId}: "
                    f"TP1 ({tp1_size_contracts}) + TP2 ({tp2_size_contracts}) = {tp1_size_contracts + tp2_size_contracts} "
                    f"!= Main Order Size ({size_in_contracts}). This should not happen with the new logic.")
-
+            
+        # --- Decide whether to attach SL based on config ---    
+        attach_sl = not getattr(config, 'USE_TRAILING_STOP_INSTEAD_OF_FIXED_SL', False)
+    
         # --- Ensure the attach_algo_ords uses the corrected sizes ---
         attach_algo_ords = [
             {
@@ -79,35 +83,35 @@ def place_order(instId, details):
                 "side": details["close_side"],
                 "posSide": details["pos_side"],
                 "ordType": "market",
-                "sz": str(tp1_size_contracts), # Use corrected TP1 size
-                # "tgtCcy": "quote_ccy", # REMOVED
+                "sz": str(tp1_size_contracts),
                 "tpTriggerPx": str(details["tp1_price"]),
                 "tpOrdPx": "-1",
                 "tpTriggerPxType": "last"
-                },
-                {
-                    "algoOrdType": "conditional",
-                    "side": details["close_side"],
-                    "posSide": details["pos_side"],
-                    "ordType": "market",
-                    "sz": str(tp2_size_contracts), # Use corrected TP2 size
-                    # "tgtCcy": "quote_ccy", # REMOVED
-                    "tpTriggerPx": str(details["tp2_price"]),
-                    "tpOrdPx": "-1",
-                    "tpTriggerPxType": "last"
-                    },
-                    {
-                        "algoOrdType": "conditional",
-                        "side": details["close_side"],
-                        "posSide": details["pos_side"],
-                        "ordType": "market",
-                        "sz": str(sl_size_contracts), # Use corrected SL size
-                        # "tgtCcy": "quote_ccy", # REMOVED
-                        "slTriggerPx": str(details["sl_price"]),
-                        "slOrdPx": "-1",
-                        "slTriggerPxType": "last"
-                        }
-                        ]
+            },
+            {
+                "algoOrdType": "conditional",
+                "side": details["close_side"],
+                "posSide": details["pos_side"],
+                "ordType": "market",
+                "sz": str(tp2_size_contracts),
+                "tpTriggerPx": str(details["tp2_price"]),
+                "tpOrdPx": "-1",
+                "tpTriggerPxType": "last"
+            }
+        ]
+
+# Conditionally add the SL dictionary
+        if attach_sl:
+            attach_algo_ords.append({
+                "algoOrdType": "conditional",
+                "side": details["close_side"],
+                "posSide": details["pos_side"],
+                "ordType": "market",
+                "sz": str(sl_size_contracts),
+                "slTriggerPx": str(details["sl_price"]),
+                "slOrdPx": "-1",
+                "slTriggerPxType": "last"
+            })
 
         # Main order payload - Specify size in contracts
         payload = {
@@ -155,7 +159,174 @@ def place_order(instId, details):
         logger.error(f"Unexpected error placing order for {instId}: {e}")
         logger.debug(f"Details provided: {details}")
         return None
-    
+
+def place_trailing_stop(instId, entry_price, pos_size_contracts, activation_pnl_percent, 
+                        callback_type, callback_value, position_side, td_mode="cross"):
+    """
+    Places a trailing stop order using OKX Algo Order API v5.
+
+    Args:
+        instId (str): Instrument ID (e.g., "KAITO-USDT-SWAP").
+        entry_price (float): The entry price of the position.
+        pos_size_contracts (float): The size of the position in contracts.
+        activation_pnl_percent (float): PnL % at which the trailing stop activates.
+        callback_type (str): Type of callback ('percent' or 'constant').
+        callback_value (float): The callback value (e.g., 0.5 for 0.5% if percent).
+        position_side (str): 'long' or 'short'.
+        td_mode (str): Trade mode ('cross' or 'isolated'). Default 'cross'.
+
+    Returns:
+        dict or None: Response from OKX API or None on failure.
+    """
+    if not all([instId, entry_price, pos_size_contracts, position_side]):
+        logger.error("place_trailing_stop: Missing required arguments.")
+        return None
+
+    if callback_type not in ["percent", "constant"]:
+        logger.error(f"place_trailing_stop: Invalid callback_type '{callback_type}'. Must be 'percent' or 'constant'.")
+        return None
+
+    if pos_size_contracts <= 0 or entry_price <= 0:
+         logger.error(f"place_trailing_stop: Invalid pos_size ({pos_size_contracts}) or entry_price ({entry_price}).")
+         return None
+
+    if position_side not in ["long", "short"]:
+         logger.error(f"place_trailing_stop: Invalid position_side '{position_side}'. Must be 'long' or 'short'.")
+         return None
+
+    try:
+        # 1. Hitung activePx berdasarkan activation_pnl_percent dan entry_price
+        # Formula: activePx = entry_price * (1 + activation_pnl_ratio) untuk Long
+        #          activePx = entry_price * (1 - activation_pnl_ratio) untuk Short
+        # activation_pnl_ratio = activation_pnl_percent / 100 / leverage
+        # Namun, karena OKX trailing stop menggunakan activePx absolut, dan leverage sudah
+        # terkandung dalam posisi, kita hitung langsung berdasarkan entry_price.
+        # PnL% = (ActivePx / Entry - 1) * Leverage * 100 (Long)
+        # Solving for ActivePx: ActivePx = Entry * (1 + PnL% / (Leverage * 100))
+        # Untuk trailing stop OKX, activePx adalah harga pasar yang harus dicapai UNTUK AKTIFKAN trailing.
+        # Jadi, kita hitung harga yang sesuai dengan PnL% target tsb.
+        # Kita asumsikan leverage dari konfigurasi untuk estimasi, tapi sebenarnya trailing stop
+        # aktif berdasarkan harga pasar, bukan PnL internal kita. 
+        # Lebih aman: Gunakan PnL% langsung untuk menghitung harga aktif.
+        # Misalnya, untuk long, jika ingin aktif di 2% profit:
+        # ActivePx = Entry * (1 + 0.02) = Entry * 1.02 (jika leverage=1 di perhitungan ini)
+        # Tapi karena trailing stop OKX aktif saat harga pasar menyentuh ActivePx,
+        # dan PnL% yang kita maksud adalah berdasarkan leverage bot kita,
+        # maka kita harus menghitung ActivePx berdasarkan leverage bot kita.
+        # Rumus yang benar (mengacu pada logika PnL% bot):
+        # Untuk Long: ActivePx = Entry * (1 + (Activation_PnL% / (Leverage * 100)))
+        # Untuk Short: ActivePx = Entry * (1 - (Activation_PnL% / (Leverage * 100)))
+        # Tapi, OKX trailing stop seringkali didefinisikan lebih sederhana sebagai
+        # harga pasar yang harus dicapai untuk mulai trailing.
+        # Mari kita gunakan pendekatan sederhana dulu:
+        # ActivePx = Entry * (1 + Activation_PnL%_as_decimal) for Long
+        # ActivePx = Entry * (1 - Activation_PnL%_as_decimal) for Short
+        # Ini berarti kita aktifkan trailing ketika harga pasar naik/turun Activation_PnL% dari entry.
+        # Ini mungkin sedikit berbeda dari PnL% internal yang menggunakan leverage, 
+        # tapi lebih sesuai dengan cara OKX trailing stop bekerja berdasarkan harga pasar.
+        # Mari pakai ini dulu, bisa disesuaikan nanti jika perlu.
+        
+        activation_pnl_decimal = activation_pnl_percent / 100.0
+        active_px = 0.0
+        if position_side == "long":
+            # Trailing aktif jika harga naik ke level ini
+            active_px = entry_price * (1 + activation_pnl_decimal) 
+        else: # position_side == "short"
+            # Trailing aktif jika harga turun ke level ini
+            active_px = entry_price * (1 - activation_pnl_decimal)
+        
+        # Bulatkan activePx sesuai presisi harga instrumen (biasanya 5 desimal)
+        # Untuk lebih aman, bisa fetch dari API /public/instruments, tapi untuk sekarang hardcode 5.
+        active_px = round(active_px, 5) 
+
+        # 2. Siapkan payload untuk API OKX
+        payload = {
+            "instId": instId,
+            "tdMode": td_mode,
+            "side": "sell" if position_side == "long" else "buy", # Arah order untuk menutup posisi
+            "posSide": position_side,
+            "ordType": "move_order_stop", # Tipe order Algo
+            "sz": str(pos_size_contracts), # Ukuran dalam kontrak
+            "activePx": str(active_px), # Harga aktivasi
+            # Tambahkan callback parameter berdasarkan tipe
+        }
+        
+        # Tambahkan callback parameter
+        if callback_type == "percent":
+            # OKX menggunakan string desimal untuk persentase (e.g., "0.1" untuk 0.1%)
+            payload["callbackRatio"] = str(callback_value) 
+        elif callback_type == "constant":
+            # OKX menggunakan string desimal untuk nilai konstan (dalam USD untuk swap)
+             # Bulatkan ke presisi yang sesuai, misal 2 desimal untuk USD
+            payload["callbackSpread"] = str(round(callback_value, 2)) 
+
+        # 3. Kirim request ke OKX API
+        logger.info(f"Placing trailing stop for {instId} ({position_side}): "
+                    f"Entry={entry_price}, ActivePx={active_px}, "
+                    f"CallbackType={callback_type}, CallbackValue={callback_value}, "
+                    f"Size={pos_size_contracts} contracts")
+        
+        logger.debug(f"Attempting to place trailing stop with payload: {payload}")
+
+        response = post_private_data("/api/v5/trade/order-algo", payload)
+
+        # 4. Tangani response
+        if response and response.get("code") == "0":
+            algo_id = response.get("data", [{}])[0].get("algoId")
+            logger.info(f"Trailing stop order placed successfully for {instId} ({position_side}). "
+                        f"AlgoId: {algo_id}")
+            return response
+        else:
+            error_msg = response.get("msg", "Unknown error")
+            error_code = response.get("code", "N/A")
+            logger.error(f"Failed to place trailing stop for {instId} ({position_side}): "
+                         f"{error_msg} (code: {error_code})")
+            # Log detail error jika ada di data array
+            if response.get("data") and isinstance(response["data"], list) and len(response["data"]) > 0:
+                s_msg = response["data"][0].get("sMsg", "")
+                s_code = response["data"][0].get("sCode", "")
+                if s_msg or s_code:
+                    logger.error(f"Specific error details: sCode={s_code}, sMsg='{s_msg}'")
+            return None
+
+    except (ValueError, TypeError, ZeroDivisionError) as e:
+        logger.error(f"Math error in place_trailing_stop for {instId}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error placing trailing stop for {instId}: {e}", exc_info=True)
+        return None
+
+
+# Fungsi opsional untuk monitoring (bisa dikembangkan lebih lanjut)
+def check_pending_algo_orders(instId, ordType=None):
+    """
+    Checks for pending algo orders for an instrument.
+    This is a basic check and can be expanded for specific order types or IDs.
+    """
+    try:
+        # Build request path with parameters
+        path = f"/api/v5/trade/orders-algo-pending?instId={instId}"
+        if ordType:
+            path += f"&ordType={ordType}"
+            
+        response = get_private_data(path)
+        if response and response.get("code") == "0":
+            orders = response.get("data", [])
+            logger.debug(f"Found {len(orders)} pending algo orders for {instId} (ordType filter: {ordType})")
+            # Log detail singkat untuk setiap order
+            for order in orders:
+                logger.debug(f"Pending Algo Order: ID={order.get('algoId')}, Type={order.get('ordType')}, "
+                             f"Inst={order.get('instId')}, Side={order.get('side')}, PosSide={order.get('posSide')}")
+            return orders
+        else:
+            error_msg = response.get("msg", "Unknown error")
+            error_code = response.get("code", "N/A")
+            logger.warning(f"Failed to fetch pending algo orders for {instId}: {error_msg} (code: {error_code})")
+            return []
+    except Exception as e:
+        logger.error(f"Error checking pending algo orders for {instId}: {e}", exc_info=True)
+        return []    
+
 # (check_open_positions and close_position functions remain largely the same)
 # Ensure check_open_positions correctly parses the size returned by OKX (it's in contracts)
 def check_open_positions(instId):

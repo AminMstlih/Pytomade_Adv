@@ -17,10 +17,21 @@ TARGET_MARGIN_USD = 1.0       # Key for small balance trading
 MAX_POSITION_SIZE_USDT = 10000
 
 # --- Risk Management ---
-TP1_PNL_PERCENT = 15.0         # 15% PNL for TP1
-TP2_PNL_PERCENT = 21.0         # 21% PNL for TP2
+TP1_PNL_PERCENT = 57.0         # 15% PNL for TP1
+TP2_PNL_PERCENT = 71.0         # 21% PNL for TP2
 TP1_SIZE_RATIO = 0.71       # 71% of position for TP1
-SL_PNL_PERCENT = -15.0         # -21% PNL for SL
+SL_PNL_PERCENT = -52.0         # -21% PNL for SL
+
+# --- Trailing Stop Parameters ---
+USE_TRAILING_STOP_INSTEAD_OF_FIXED_SL = True
+# Aktifkan trailing stop setelah posisi mencapai profit ini (%)
+TRAILING_STOP_ACTIVATION_PNL_PERCENT = 0.2 
+# Jarak trailing stop dari harga tertinggi/terendah (%)
+TRAILING_STOP_CALLBACK_RATIO_PERCENT = 0.005  
+# Tipe callback: 'percent' atau 'constant' (kita gunakan 'percent')
+TRAILING_STOP_CALLBACK_TYPE = "percent" 
+# Interval (detik) untuk memeriksa dan memasang trailing stop (jika diperlukan)
+TRAILING_STOP_CHECK_INTERVAL_SECONDS = 60 
 
 # --- Market Filters ---
 MIN_24H_VOLUME_USDT = 1000000
@@ -36,13 +47,13 @@ STOCH_D_PERIOD = 3
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 ADX_THRESHOLD = 7
-VOLUME_THRESHOLD_MULTIPLIER = 0.2 # Volume vs EMA(5)
+VOLUME_THRESHOLD_MULTIPLIER = 0.1 # Volume vs EMA(5)
 
 # --- Execution & Timing ---
 POLLING_INTERVAL_SECONDS = 15
 SIGNAL_COOLDOWN_SECONDS = 60
-API_RATE_LIMIT_DELAY = 0.1
+API_RATE_LIMIT_DELAY = 0.5
 
 # --- Logging ---
-LOG_LEVEL = "INFO" # Can be DEBUG for more details
+LOG_LEVEL = "DEBUG" # Can be DEBUG for more details
 LOG_FILE = "trading_bot.log"

@@ -110,6 +110,44 @@ def run():
                     # Update state
                     set_last_signal(signal)
                     set_last_trade_time(time.time())
+
+                    # --- Tambahkan Pemanggilan Trailing Stop di Sini ---
+                    # Pastikan konfigurasi trailing stop diaktifkan
+                    if hasattr(config, 'TRAILING_STOP_ACTIVATION_PNL_PERCENT') and \
+                       config.TRAILING_STOP_ACTIVATION_PNL_PERCENT > 0:
+                        
+                        # Ambil informasi dari order_result
+                        entry_price_for_ts = order_result.get('entry_price')
+                        size_for_ts = order_result.get('size_contracts', 0) # Pastikan ini adalah size dalam kontrak
+                        pos_side_for_ts = order_result.get('pos_side')
+                        
+                        if entry_price_for_ts and size_for_ts > 0 and pos_side_for_ts:
+                            # Gunakan parameter dari config
+                            ts_activation_pnl = config.TRAILING_STOP_ACTIVATION_PNL_PERCENT
+                            ts_callback_type = config.TRAILING_STOP_CALLBACK_TYPE
+                            ts_callback_value = config.TRAILING_STOP_CALLBACK_RATIO_PERCENT # Karena kita gunakan percent
+                            ts_inst_id = config.INSTRUMENT
+                            ts_td_mode = "cross" # Sesuaikan jika perlu
+
+                            # Panggil fungsi trailing stop
+                            ts_response = order_executor.place_trailing_stop(
+                                instId=ts_inst_id,
+                                entry_price=entry_price_for_ts,
+                                pos_size_contracts=size_for_ts,
+                                activation_pnl_percent=ts_activation_pnl,
+                                callback_type=ts_callback_type,
+                                callback_value=ts_callback_value,
+                                position_side=pos_side_for_ts,
+                                td_mode=ts_td_mode
+                            )
+                            if ts_response:
+                                logger.info(f"Trailing stop order initiated for new {pos_side_for_ts} position.")
+                            else:
+                                logger.error(f"Failed to initiate trailing stop for new {pos_side_for_ts} position.")
+                        else:
+                            logger.warning("Could not get order details for trailing stop placement.")
+                    # --- Akhir Penambahan Trailing Stop ---
+
                 else:
                     logger.error("Order placement failed.")
             else:

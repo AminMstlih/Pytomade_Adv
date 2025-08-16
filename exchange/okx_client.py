@@ -8,6 +8,16 @@ from bot.config import OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE, OKX_BASE_URL
 from bot.logger_config import logger
 import sys
 
+# --- Add type checks and defaults for environment variables ---
+# Ensure these are strings, even if os.getenv returned None
+_API_KEY = OKX_API_KEY or "" 
+_SECRET_KEY = OKX_SECRET_KEY or ""
+_PASSPHRASE = OKX_PASSPHRASE or ""
+
+# Basic check to warn if keys seem unset (though technically "" is a valid string)
+if not _API_KEY or not _SECRET_KEY or not _PASSPHRASE:
+    logger.warning("OKX API credentials (KEY, SECRET, PASSPHRASE) are not set or are empty strings. API requests will likely fail.")
+
 # HTTP session for optimized API calls
 _session = requests.Session()
 
@@ -27,37 +37,43 @@ def get_server_time():
 
 def _generate_signature(timestamp, method, request_path, body=''):
     """Generates the signature for OKX API requests."""
+    # --- Use the checked variables ---
     message = timestamp + method.upper() + request_path + body
+    # Ensure _SECRET_KEY is bytes
     mac = hmac.new(
-        bytes(OKX_SECRET_KEY, encoding='utf8'),
-        bytes(message, encoding='utf-8'),
+        _SECRET_KEY.encode('utf-8'), # Use checked variable
+        message.encode('utf-8'),
         digestmod='sha256'
     )
     d = mac.digest()
     return base64.b64encode(d).decode()
 
 def make_request(method, request_path, data=None):
-    """
-    Makes a request to the OKX API.
-    Handles both public (GET) and private (GET/POST) requests.
-    """
-    url = OKX_BASE_URL + request_path
-    body = json.dumps(data) if data else ''
+    # ... (setup code) ...
+
+    # --- Crucially, define 'url' and 'body' at the start ---
+    url = OKX_BASE_URL + request_path  # <-- Define 'url' here
+    # Convert data dictionary to JSON string, or use empty string if None
+    body = json.dumps(data) if data else '' # <-- Define 'body' here
+    # --- End of crucial definitions ---
+
     is_private = method.upper() in ['GET', 'POST'] and any(
         prefix in request_path for prefix in ['/api/v5/account', '/api/v5/trade']
     )
     
     headers = {
         'Content-Type': 'application/json',
-        'x-simulated-trading': '0' # 0 for real market
+        'x-simulated-trading': '0'
     }
     
     if is_private:
+        # --- Use the checked variables and ensure they are strings ---
+        # Even if _API_KEY etc are "", str() ensures they are treated as strings for the dict
         timestamp = get_server_time()
-        headers['OK-ACCESS-KEY'] = OKX_API_KEY
+        headers['OK-ACCESS-KEY'] = str(_API_KEY) # Use checked variable, ensure string
         headers['OK-ACCESS-SIGN'] = _generate_signature(timestamp, method, request_path, body)
-        headers['OK-ACCESS-TIMESTAMP'] = timestamp
-        headers['OK-ACCESS-PASSPHRASE'] = OKX_PASSPHRASE
+        headers['OK-ACCESS-TIMESTAMP'] = str(timestamp) # Ensure string
+        headers['OK-ACCESS-PASSPHRASE'] = str(_PASSPHRASE) # Use checked variable, ensure string
         logger.debug(f"Generated private headers for {method} {request_path}")
 
     for attempt in range(3):
@@ -78,24 +94,44 @@ def make_request(method, request_path, data=None):
             return data
         except requests.exceptions.RequestException as e:
             logger.error(f"Request {method} {request_path} failed (attempt {attempt+1}/3): {e}")
+
+            # --- Enhanced Error Logging ---
+            error_data = {"code": "1", "msg": f"Network/Request error: {str(e)}", "data": []}
+            error_logged = False # Flag to track if we logged specific details
+
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Raw error response text for {method} {request_path}: {e.response.text}") # Log raw text first
+                try:
+                    # Try to parse the error response body as JSON
+                    error_body = e.response.json()
+                    logger.error(f"Parsed error response body for {method} {request_path}: {error_body}") # Log parsed JSON
+                    error_data.update(error_body) # Merge parsed data
+
+                    # Extract and log specific error details (sMsg, sCode) if present
+                    # This is the critical part often found in data[0] for order errors
+                    if isinstance(error_body.get("data"), list) and len(error_body["data"]) > 0:
+                        error_item = error_body["data"][0]
+                        if isinstance(error_item, dict):
+                            s_msg = error_item.get("sMsg", "")
+                            s_code = error_item.get("sCode", "")
+                            if s_msg or s_code:
+                                logger.error(f"*** SPECIFIC ERROR for {method} {request_path}: sCode={s_code}, sMsg='{s_msg}' ***")
+                                error_logged = True # Mark that we found specific details
+                except json.JSONDecodeError as je:
+                    logger.error(f"Could not decode JSON from error response for {method} {request_path}: {je}")
+                except Exception as parse_error:
+                    logger.error(f"Unexpected error parsing error response JSON for {method} {request_path}: {parse_error}")
+
+            # If we couldn't get specific details from the response body, at least log the HTTP details
+            if not error_logged:
+                logger.error(f"Request failed with HTTP {e.response.status_code if e.response else 'N/A'} "
+                             f"for {method} {request_path}. Reason: {e.response.reason if e.response else 'N/A'}")
+
             if attempt < 2:
                 time.sleep(5) # Wait before retrying
             else:
                 logger.error(f"Final failure for {method} {request_path} after 3 attempts.")
-                return {"code": "1", "msg": f"Network/Request error: {str(e)}", "data": []}
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON response for {method} {request_path} (attempt {attempt+1}/3): {e}")
-            logger.error(f"Response text: {response.text}")
-            if attempt < 2:
-                time.sleep(5)
-            else:
-                return {"code": "1", "msg": f"JSON decode error: {str(e)}", "data": []}
-        except Exception as e: # Catch other unexpected errors
-             logger.error(f"Unexpected error during {method} {request_path} (attempt {attempt+1}/3): {e}")
-             if attempt < 2:
-                time.sleep(5)
-             else:
-                return {"code": "1", "msg": f"Unexpected error: {str(e)}", "data": []}
+                return error_data # Return structured error data
 
     # This line should ideally not be reached due to the loop logic, but added for safety
     return {"code": "1", "msg": "Request failed after all retries (internal logic error)", "data": []}

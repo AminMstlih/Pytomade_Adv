@@ -56,7 +56,7 @@ def _adx(high, low, close, period=14):
     adx = dx.rolling(window=period, min_periods=period).mean()
     return adx
 
-def _hurst(series, max_lag=20):
+def _hurst(series, max_lag=5):
     """
     Calculates the Hurst exponent using the Rescaled Range (R/S) method.
     ... (docstring) ...
@@ -156,7 +156,7 @@ def calculate_indicators(df):
         df["stochrsi_k"], df["stochrsi_d"] = _stochrsi(df["close"], rsi_length=RSI_STOCH_PERIOD, stoch_length=RSI_STOCH_PERIOD, k=STOCH_K_PERIOD, d=STOCH_D_PERIOD)
         df["atr"] = _atr(df["high"], df["low"], df["close"], ATR_PERIOD)
         df["adx"] = _adx(df["high"], df["low"], df["close"], ADX_PERIOD)
-        df["hurst"] = _hurst(df["close"], max_lag=20) # Adjust max_lag if needed
+        df["hurst"] = _hurst(df["close"], max_lag=50) # Adjust max_lag if needed
         df["volume_ema"] = _ema(df["volume"], 5) # Using fixed 5 for volume EMA as in original
         logger.debug(f"Indicators calculated for latest row: "
             f"EMA_Fast={df['ema_fast'].iloc[-1]:.6f}, EMA_Slow={df['ema_slow'].iloc[-1]:.6f}, "
@@ -197,13 +197,13 @@ def generate_signal(df):
         adx_strong = latest["adx"] > ADX_THRESHOLD
         stoch_not_overbought = latest["stochrsi_k"] < 85
         stoch_not_oversold = latest["stochrsi_k"] > 15
-        hurst_trending = latest["hurst"] > 0.5
-        hurst_mean_reverting = latest["hurst"] < 0.4
+        hurst_trending = latest["hurst"] > 0.275
+        hurst_mean_reverting = latest["hurst"] < 0.225
 
         signal = None
-        if (ma_long and stochrsi_long and volume_trend and stoch_not_overbought and adx_strong and hurst_trending):
+        if (ma_long and stochrsi_long and volume_trend and stoch_not_overbought and adx_strong):
             signal = "long"
-        elif (ma_short and stochrsi_short and volume_trend and stoch_not_oversold and adx_strong and hurst_mean_reverting):
+        elif (ma_short and stochrsi_short and volume_trend and adx_strong):
             signal = "short"
 
         logger.info(f"Signal check for {df.iloc[-1]['timestamp'] if 'timestamp' in df.columns else 'N/A'}: "
