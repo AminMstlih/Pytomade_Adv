@@ -201,9 +201,9 @@ def generate_signal(df):
         hurst_mean_reverting = latest["hurst"] < 0.225
 
         signal = None
-        if (ma_long and stochrsi_long and volume_trend and stoch_not_overbought and adx_strong):
+        if (ma_long and stochrsi_long and volume_trend and stoch_not_overbought and adx_strong and hurst_trending):
             signal = "long"
-        elif (ma_short and stochrsi_short and volume_trend and adx_strong):
+        elif (ma_short and stochrsi_short and volume_trend and stoch_not_oversold and adx_strong and hurst_mean_reverting):
             signal = "short"
 
         logger.info(f"Signal check for {df.iloc[-1]['timestamp'] if 'timestamp' in df.columns else 'N/A'}: "
