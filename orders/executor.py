@@ -74,7 +74,7 @@ def place_order(instId, details):
                    f"!= Main Order Size ({size_in_contracts}). This should not happen with the new logic.")
             
         # --- Decide whether to attach SL based on config ---    
-        attach_sl = not getattr(config, 'USE_TRAILING_STOP_INSTEAD_OF_FIXED_SL', False)
+        attach_sl = not getattr(config, 'USE_TRAILING_STOP_WITH_FIXED_SL', False)
     
         # --- Ensure the attach_algo_ords uses the corrected sizes ---
         attach_algo_ords = [
@@ -97,12 +97,8 @@ def place_order(instId, details):
                 "tpTriggerPx": str(details["tp2_price"]),
                 "tpOrdPx": "-1",
                 "tpTriggerPxType": "last"
-            }
-        ]
-
-# Conditionally add the SL dictionary
-        if attach_sl:
-            attach_algo_ords.append({
+            },
+            {
                 "algoOrdType": "conditional",
                 "side": details["close_side"],
                 "posSide": details["pos_side"],
@@ -111,7 +107,12 @@ def place_order(instId, details):
                 "slTriggerPx": str(details["sl_price"]),
                 "slOrdPx": "-1",
                 "slTriggerPxType": "last"
-            })
+            }
+            ]
+
+        # Conditionally add the SL dictionary
+        """if attach_sl:
+            attach_algo_ords.append()"""
 
         # Main order payload - Specify size in contracts
         payload = {
@@ -259,7 +260,7 @@ def place_trailing_stop(instId, entry_price, pos_size_contracts, activation_pnl_
             # OKX menggunakan string desimal untuk nilai konstan (dalam USD untuk swap)
              # Bulatkan ke presisi yang sesuai, misal 2 desimal untuk USD
             payload["callbackSpread"] = str(round(callback_value, 2)) 
-
+        
         # 3. Kirim request ke OKX API
         logger.info(f"Placing trailing stop for {instId} ({position_side}): "
                     f"Entry={entry_price}, ActivePx={active_px}, "
