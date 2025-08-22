@@ -1,7 +1,12 @@
 # backtest/engine.py
 """
 Backtesting engine for the Pytomade Bot strategy.
-Simulates trades on historical data.
+Simulates trades on historical data with improved realism:
+- Timeline correctness: signal on bar i-1, enter at bar i open
+- Deterministic intrabar execution order (OHLC or OLHC)
+- Partial TP1/TP2 handling with optional SL-to-breakeven
+- Notional-based PnL and fee model
+- Mark-to-market equity (unrealized PnL)
 """
 
 import pandas as pd
@@ -9,6 +14,20 @@ import numpy as np
 from market import strategy
 from bot import config
 from bot.logger_config import logger # Use the same logger
+
+# --- Backtest behavior flags (kept local to avoid changing config.py) ---
+# Intrabar path assumption when both TP/SL are hit within the same candle.
+# Options: "OHLC" (open->high->low->close) or "OLHC" (open->low->high->close)
+BAR_ORDER = "OLHC"  # Conservative for longs (SL can hit before TP); switch to "OHLC" to test sensitivity
+
+# Apply partial profit taking: TP1 closes TP1_SIZE_RATIO, TP2 closes remainder
+ENABLE_PARTIALS = True
+
+# After TP1 fill, move stop to breakeven (entry price) on remaining size
+MOVE_SL_TO_BREAKEVEN_AFTER_TP1 = True
+
+# Fee model: use taker fee on both entry and exit based on traded notional
+# Use the fee_rate argument as taker fee rate per side
 
 def run_backtest(historical_df, initial_capital=100.0, fee_rate=0.001):
     """
@@ -41,242 +60,279 @@ def run_backtest(historical_df, initial_capital=100.0, fee_rate=0.001):
         return df, [], {}
 
     # --- Tracking Variables ---
+    # "capital" tracks cash after realized PnL and fees (margin not deducted)
     capital = initial_capital
-    # Simplified: Track one open position at a time for now, matching live bot's potential hedging logic later
-    open_positions = {} # key: 'long'/'short', value: position dict
-    closed_trades = [] # List of dictionaries for closed trades
-    equity_curve = [initial_capital] # Track capital over time
-    peak_capital = initial_capital
+    # Support at most one position per side (long/short) to match current strategy
+    open_positions = {}  # key: 'long'|'short' -> position dict
+    closed_trades = []   # list of dicts
+    equity_curve = []    # mark-to-market equity each bar
+    peak_equity = initial_capital
     max_drawdown = 0.0
 
-    # Add a column to store signals in the main dataframe for analysis
+    # Add columns for signals and bookkeeping
     df['signal'] = None
+
+    # --- Helper functions ---
+    def _pnl_for(side, entry_price, exit_price, notional):
+        if side == 'long':
+            return notional * (exit_price / entry_price - 1)
+        else:
+            return notional * (1 - exit_price / entry_price)
+
+    def _apply_bar_order_for_long(high, low, tp_hit, sl_hit, tp_price, sl_price):
+        # Returns list of fills [(type, price)] in order for the candle
+        events = []
+        if BAR_ORDER == "OHLC":
+            if tp_hit and sl_hit:
+                # High first then Low
+                if high >= tp_price:
+                    events.append(("TP", tp_price))
+                if low <= sl_price:
+                    events.append(("SL", sl_price))
+            elif tp_hit:
+                events.append(("TP", tp_price))
+            elif sl_hit:
+                events.append(("SL", sl_price))
+        else:  # OLHC
+            if tp_hit and sl_hit:
+                # Low first then High (pessimistic for longs)
+                if low <= sl_price:
+                    events.append(("SL", sl_price))
+                if high >= tp_price:
+                    events.append(("TP", tp_price))
+            elif sl_hit:
+                events.append(("SL", sl_price))
+            elif tp_hit:
+                events.append(("TP", tp_price))
+        return events
+
+    def _apply_bar_order_for_short(high, low, tp_hit, sl_hit, tp_price, sl_price):
+        events = []
+        if BAR_ORDER == "OHLC":
+            if tp_hit and sl_hit:
+                # High then Low (pessimistic for shorts; SL above)
+                if high >= sl_price:
+                    events.append(("SL", sl_price))
+                if low <= tp_price:
+                    events.append(("TP", tp_price))
+            elif sl_hit:
+                events.append(("SL", sl_price))
+            elif tp_hit:
+                events.append(("TP", tp_price))
+        else:  # OLHC
+            if tp_hit and sl_hit:
+                # Low then High (optimistic for shorts)
+                if low <= tp_price:
+                    events.append(("TP", tp_price))
+                if high >= sl_price:
+                    events.append(("SL", sl_price))
+            elif tp_hit:
+                events.append(("TP", tp_price))
+            elif sl_hit:
+                events.append(("SL", sl_price))
+        return events
 
     # --- Main Backtesting Loop ---
     # Iterate from the point where enough data exists for indicators
+    # We'll generate signal on bar i-1 close and enter at bar i open
     for i in range(required_buffer, len(df)):
-        current_index = df.index[i]
-        current_timestamp = df.loc[current_index, 'timestamp']
-        current_candle = df.loc[current_index] # Series for the current candle
+        idx = df.index[i]
+        ts = df.loc[idx, 'timestamp']
+        candle = df.loc[idx]
 
-        # --- Initialize variables for this loop iteration ---
-        exit_happened = False # Initialize here to ensure it's always defined
-        # --- End of initialization ---
+        # Prepare indicators up to previous bar for signal
+        exit_happened_this_bar = False
+        if i - 1 >= 0:
+            sig_df = df.loc[:df.index[i - 1]].copy()
+        else:
+            sig_df = None
 
-        # 1. Analyze Data up to current point for signal generation
-        # Use data including the current candle for decision (decision made at close)
-        data_for_analysis = df.loc[:current_index].copy()
+        data_with_ind = strategy.calculate_indicators(sig_df) if sig_df is not None else None
+        sig = strategy.generate_signal(data_with_ind) if (data_with_ind is not None and not data_with_ind.empty) else None
+        df.loc[idx, 'signal'] = sig
 
-        # 2. Calculate Indicators
-        data_with_indicators = strategy.calculate_indicators(data_for_analysis)
-        if data_with_indicators is None or data_with_indicators.empty:
-            logger.debug(f"Skipping index {i} due to indicator calculation failure or insufficient data.")
-            equity_curve.append(capital) # Capital unchanged
-            continue
-
-        # 3. Generate Signal using the latest row (current candle)
-        # Pass the df *with* indicators
-        sig = strategy.generate_signal(data_with_indicators)
-        df.loc[current_index, 'signal'] = sig # Store signal in main df
-
-        ## --- Simulate Trade Execution (at the next candle's open) ---
-        # Check for entry signal and if we don't already have a position on that side
-        next_index = df.index[i + 1] if (i + 1) < len(df) else None
-        if sig in ['long', 'short'] and next_index is not None and sig not in open_positions:
-             next_candle = df.loc[next_index]
-             entry_price = next_candle['open'] # Enter at next candle's open
-
-             # --- Simplified Position Sizing (Matching risk manager logic conceptually) ---
-             # Use config values to determine size. Backtest in USD value terms is common.
-             # Size_USD = Margin_USD * Leverage (Conceptually, for PnL calculation)
-             position_size_usd = config.TARGET_MARGIN_USD * config.LEVERAGE
-             position_size_usd = min(position_size_usd, config.MAX_POSITION_SIZE_USDT) # Apply cap
-
-             # Calculate TP/SL prices (same logic as risk manager)
-             leverage_factor = config.LEVERAGE * 100.0
-             if sig == "long":
-                 tp1_distance_ratio = config.TP1_PNL_PERCENT / leverage_factor
-                 tp2_distance_ratio = config.TP2_PNL_PERCENT / leverage_factor
-                 sl_distance_ratio = config.SL_PNL_PERCENT / leverage_factor
-                 tp1_price = entry_price * (1 + tp1_distance_ratio)
-                 tp2_price = entry_price * (1 + tp2_distance_ratio)
-                 sl_price = entry_price * (1 + sl_distance_ratio)
-             else: # sig == "short"
-                 tp1_distance_ratio = config.TP1_PNL_PERCENT / leverage_factor
-                 tp2_distance_ratio = config.TP2_PNL_PERCENT / leverage_factor
-                 sl_distance_ratio = config.SL_PNL_PERCENT / leverage_factor
-                 tp1_price = entry_price * (1 - tp1_distance_ratio)
-                 tp2_price = entry_price * (1 - tp2_distance_ratio)
-                 sl_price = entry_price * (1 - sl_distance_ratio)
-
-             tp1_price = round(tp1_price, 6) # Round appropriately
-             tp2_price = round(tp2_price, 6)
-             sl_price = round(sl_price, 6)
-
-             # Calculate TP sizes in USD value (for PnL calculation)
-             tp1_size_usd = round(config.TP1_SIZE_RATIO * position_size_usd, 2)
-             tp2_size_usd = round((1 - config.TP1_SIZE_RATIO) * position_size_usd, 2)
-             sl_size_usd = round(position_size_usd, 2) # SL covers full intended size conceptually
-
-             # Deduct margin cost from capital (simulate margin usage)
-             margin_cost = position_size_usd / config.LEVERAGE
-             capital -= margin_cost
-             if capital < 0:
-                 logger.warning(f"Capital depleted at {current_timestamp}. Stopping backtest.")
-                 break # Stop if capital runs out
-
-             # Create and store the open position
-             open_positions[sig] = {
-                 'side': sig,
-                 'entry_price': entry_price,
-                 'size_usd': position_size_usd, # Total intended size (for reference)
-                 'margin_usd': margin_cost,
-                 'tp1_price': tp1_price,
-                 'tp2_price': tp2_price,
-                 'sl_price': sl_price,
-                 'tp1_size_usd': tp1_size_usd,
-                 'tp2_size_usd': tp2_size_usd,
-                 'sl_size_usd': sl_size_usd, # For PnL calculation if needed
-                 'entry_timestamp': next_candle['timestamp'], # Timestamp of entry candle
-                 'entry_index': next_index, # Index in df for entry
-                 'status': 'open'
-             }
-             logger.debug(f"[{next_candle['timestamp']}] Entered {sig} @ {entry_price:.6f}, "
-                          f"Capital: ${capital:.4f}, Margin Used: ${margin_cost:.4f}")
-
-        # --- Check Open Positions for Exits (based on current candle's H/L) ---
-        # Iterate over a copy of keys to allow modification of open_positions dict
-        # Important: Only check exits if there are open positions
-        if open_positions: # Add this check
-            for pos_side in list(open_positions.keys()):
-                position = open_positions[pos_side]
-                if position['status'] != 'open':
+        # 1) Check exits for existing positions using current candle only if the
+        #    position was opened on a prior bar (position['entry_index'] < idx)
+        if open_positions:
+            for side_key in list(open_positions.keys()):
+                pos = open_positions[side_key]
+                if pos['status'] != 'open':
+                    continue
+                if pos['entry_index'] == idx:
+                    # Prevent same-bar exit at the entry bar
                     continue
 
-            # Exit flags
-            exit_happened = False
-            exit_price = None
-            exit_type = None
-            pnl = 0
-            fee = 0
+                # Determine if TP/SL levels are touched in this candle
+                high = candle['high']
+                low = candle['low']
 
-            # Determine price range for exit checks
-            # Use current candle (i) and potentially next candle (i+1) if it exists
-            # This check happens after the entry decision for candle i
-            check_low = current_candle['low']
-            check_high = current_candle['high']
-            # If we entered at the *next* candle's open (i+1), the earliest exit check
-            # based on candle i's price is logically inconsistent unless we check
-            # the *next* candle's price (i+1) against the entry (also at i+1 open).
-            # Let's simplify: Check exits based on the *current* candle (i) against
-            # an entry that hypothetically happened *before* or at the start of this evaluation.
-            # A more precise way: Entry at i's close, exit check at i+1's high/low.
-            # Or, Entry at i's close, exit check using i's high/low (if order fills instantly).
-            # Let's assume entry happens quickly after signal (e.g., at close of signal candle i)
-            # and exit is checked against the *next* candle (i+1).
-            # But our loop is on i. To check exit for an entry at i, we need i+1.
-            # To check exit for an entry at i-1, we use current candle i.
-            # This is getting complex. Let's simplify:
-            # Entry: At close of signal candle.
-            # Exit Check: Against high/low of the *same* candle the signal was generated
-            # (or the next, depending on interpretation). Let's check against current candle (i)
-            # for an entry that happened previously (need to track entry time).
+                if pos['side'] == 'long':
+                    tp_hit = (high >= pos['tp1_price']) or (high >= pos['tp2_price'])
+                    sl_hit = low <= pos['sl_price']
+                    events = _apply_bar_order_for_long(high, low, tp_hit, sl_hit,
+                                                       min(pos['tp1_price'], pos['tp2_price']), pos['sl_price'])
+                else:
+                    tp_hit = (low <= pos['tp1_price']) or (low <= pos['tp2_price'])
+                    sl_hit = high >= pos['sl_price']
+                    events = _apply_bar_order_for_short(high, low, tp_hit, sl_hit,
+                                                        max(pos['tp1_price'], pos['tp2_price']), pos['sl_price'])
 
-            # Better approach: Iterate through open positions and check against the current price bar.
-            # Assume position was entered before or during the period represented by current_candle.
+                # Apply event sequence, supporting partials
+                for ev_type, ev_price in events:
+                    if pos['remaining_usd'] <= 0:
+                        break
+                    if ev_type == 'SL':
+                        # Close all remaining size at SL
+                        close_notional = pos['remaining_usd']
+                        pnl = _pnl_for(pos['side'], pos['entry_price'], ev_price, close_notional)
+                        exit_fee = close_notional * fee_rate
+                        capital += pnl - exit_fee
 
-            if position['side'] == 'long':
-                # Check for SL (price goes below SL)
-                if check_low <= position['sl_price']:
-                    exit_price = position['sl_price']
-                    exit_type = 'SL'
-                    # PnL for long: (Exit / Entry - 1) * Leverage * Position_Size_USD
-                    # This calculates PnL for the entire intended position size that was margined
-                    # In live trade, attached TPs/SLs handle partials. Here, we simplify.
-                    # Let's assume the whole position is closed at SL for now.
-                    # More accurate: Track partial closes like live bot.
-                    # Simplification for now: Close full position at SL.
-                    pnl = (exit_price / position['entry_price'] - 1) * config.LEVERAGE * position['size_usd']
-                    # Fee: Charged on entry margin + exit value (approximated by entry size)
-                    fee = (position['margin_usd'] + abs(pnl)) * fee_rate
-                    exit_happened = True
-                # Check for TP1 (price goes above TP1)
-                elif check_high >= position['tp1_price']:
-                     exit_price = position['tp1_price']
-                     exit_type = 'TP1'
-                     pnl = (exit_price / position['entry_price'] - 1) * config.LEVERAGE * position['tp1_size_usd']
-                     fee = (position['margin_usd'] * config.TP1_SIZE_RATIO + abs(pnl)) * fee_rate
-                     # For simplicity, close the TP1 part. In live, the algo order handles this.
-                     # We can either close part or full. Let's close part and keep the rest.
-                     # This requires tracking partial position. Simpler: Close full position on first TP/SL.
-                     # Let's stick to close full position on first touch for simplicity in this version.
-                     # TODO: Implement partial closes for more accurate backtest.
-                     exit_happened = True # This will close the whole position in this simplified logic
-                # Check for TP2 (price goes above TP2)
-                elif check_high >= position['tp2_price']:
-                     exit_price = position['tp2_price']
-                     exit_type = 'TP2'
-                     pnl = (exit_price / position['entry_price'] - 1) * config.LEVERAGE * position['tp2_size_usd']
-                     fee = (position['margin_usd'] * (1 - config.TP1_SIZE_RATIO) + abs(pnl)) * fee_rate
-                     exit_happened = True # This will close the whole position
+                        closed_trades.append({
+                            'entry_time': pos['entry_timestamp'],
+                            'exit_time': ts,
+                            'side': pos['side'],
+                            'entry_price': pos['entry_price'],
+                            'exit_price': ev_price,
+                            'type': 'SL',
+                            'pnl': pnl,
+                            'fee': exit_fee,
+                            'capital_after': capital
+                        })
+                        pos['remaining_usd'] = 0
+                        pos['status'] = 'closed'
+                        exit_happened_this_bar = True
+                        break
+                    elif ev_type == 'TP':
+                        if ENABLE_PARTIALS:
+                            # Decide which TP is hit first based on price distance
+                            # Use TP1 first, then TP2 for remainder
+                            if not pos.get('tp1_filled', False) and (
+                                (pos['side'] == 'long' and ev_price >= pos['tp1_price']) or
+                                (pos['side'] == 'short' and ev_price <= pos['tp1_price'])
+                            ):
+                                close_notional = min(pos['tp1_size_usd'], pos['remaining_usd'])
+                                pnl = _pnl_for(pos['side'], pos['entry_price'], pos['tp1_price'], close_notional)
+                                exit_fee = close_notional * fee_rate
+                                capital += pnl - exit_fee
+                                pos['remaining_usd'] -= close_notional
+                                pos['tp1_filled'] = True
+                                closed_trades.append({
+                                    'entry_time': pos['entry_timestamp'],
+                                    'exit_time': ts,
+                                    'side': pos['side'],
+                                    'entry_price': pos['entry_price'],
+                                    'exit_price': pos['tp1_price'],
+                                    'type': 'TP1',
+                                    'pnl': pnl,
+                                    'fee': exit_fee,
+                                    'capital_after': capital
+                                })
+                                if MOVE_SL_TO_BREAKEVEN_AFTER_TP1 and pos['remaining_usd'] > 0:
+                                    pos['sl_price'] = pos['entry_price']
+                            elif pos.get('tp1_filled', False) and (
+                                (pos['side'] == 'long' and ev_price >= pos['tp2_price']) or
+                                (pos['side'] == 'short' and ev_price <= pos['tp2_price'])
+                            ):
+                                close_notional = pos['remaining_usd']
+                                pnl = _pnl_for(pos['side'], pos['entry_price'], pos['tp2_price'], close_notional)
+                                exit_fee = close_notional * fee_rate
+                                capital += pnl - exit_fee
+                                pos['remaining_usd'] = 0
+                                pos['status'] = 'closed'
+                                closed_trades.append({
+                                    'entry_time': pos['entry_timestamp'],
+                                    'exit_time': ts,
+                                    'side': pos['side'],
+                                    'entry_price': pos['entry_price'],
+                                    'exit_price': pos['tp2_price'],
+                                    'type': 'TP2',
+                                    'pnl': pnl,
+                                    'fee': exit_fee,
+                                    'capital_after': capital
+                                })
+                                exit_happened_this_bar = True
+                                break
+                        else:
+                            # Close full on first TP if partials disabled
+                            close_notional = pos['remaining_usd']
+                            pnl = _pnl_for(pos['side'], pos['entry_price'], ev_price, close_notional)
+                            exit_fee = close_notional * fee_rate
+                            capital += pnl - exit_fee
+                            closed_trades.append({
+                                'entry_time': pos['entry_timestamp'],
+                                'exit_time': ts,
+                                'side': pos['side'],
+                                'entry_price': pos['entry_price'],
+                                'exit_price': ev_price,
+                                'type': 'TP',
+                                'pnl': pnl,
+                                'fee': exit_fee,
+                                'capital_after': capital
+                            })
+                            pos['remaining_usd'] = 0
+                            pos['status'] = 'closed'
+                            exit_happened_this_bar = True
+                            break
 
-            elif position['side'] == 'short':
-                # Check for SL (price goes above SL)
-                if check_high >= position['sl_price']:
-                    exit_price = position['sl_price']
-                    exit_type = 'SL'
-                    pnl = (1 - exit_price / position['entry_price']) * config.LEVERAGE * position['size_usd']
-                    fee = (position['margin_usd'] + abs(pnl)) * fee_rate
-                    exit_happened = True
-                # Check for TP1 (price goes below TP1)
-                elif check_low <= position['tp1_price']:
-                     exit_price = position['tp1_price']
-                     exit_type = 'TP1'
-                     pnl = (1 - exit_price / position['entry_price']) * config.LEVERAGE * position['tp1_size_usd']
-                     fee = (position['margin_usd'] * config.TP1_SIZE_RATIO + abs(pnl)) * fee_rate
-                     exit_happened = True
-                # Check for TP2 (price goes below TP2)
-                elif check_low <= position['tp2_price']:
-                     exit_price = position['tp2_price']
-                     exit_type = 'TP2'
-                     pnl = (1 - exit_price / position['entry_price']) * config.LEVERAGE * position['tp2_size_usd']
-                     fee = (position['margin_usd'] * (1 - config.TP1_SIZE_RATIO) + abs(pnl)) * fee_rate
-                     exit_happened = True
+                # Clean up closed positions
+                if pos['status'] == 'closed':
+                    del open_positions[side_key]
 
-            if exit_happened:
-                # Add PnL and return margin
-                capital = capital + position['margin_usd'] + pnl - fee # Return margin + PnL - Fee
-                equity_curve.append(capital)
-                # Update peak capital and drawdown
-                if capital > peak_capital:
-                    peak_capital = capital
-                current_drawdown = (peak_capital - capital) / peak_capital if peak_capital > 0 else 0
-                max_drawdown = max(max_drawdown, current_drawdown)
+        # 2) Process new entries at current bar open if signal was generated on prior bar
+        if sig in ['long', 'short'] and sig not in open_positions and i < len(df):
+            entry_price = candle['open']
 
-                # Log the closed trade
-                closed_trades.append({
-                    'entry_time': position['entry_timestamp'],
-                    'exit_time': current_timestamp,
-                    'side': position['side'],
-                    'entry_price': position['entry_price'],
-                    'exit_price': exit_price,
-                    'type': exit_type,
-                    'pnl': pnl,
-                    'fee': fee,
-                    'capital_after': capital
-                })
-                logger.debug(f"[{current_timestamp}] Exited {position['side']} @ {exit_price:.6f} ({exit_type}), "
-                             f"PnL: ${pnl:.4f}, Fee: ${fee:.4f}, Capital: ${capital:.4f}")
+            # Position sizing: notional = margin * leverage, capped
+            notional = min(config.TARGET_MARGIN_USD * config.LEVERAGE, config.MAX_POSITION_SIZE_USDT)
 
-                # Remove the closed position
-                del open_positions[pos_side] # Close the position (simplified full close)
+            # Compute TP/SL prices
+            lev_factor = config.LEVERAGE * 100.0
+            if sig == 'long':
+                tp1_price = round(entry_price * (1 + config.TP1_PNL_PERCENT / lev_factor), 6)
+                tp2_price = round(entry_price * (1 + config.TP2_PNL_PERCENT / lev_factor), 6)
+                sl_price = round(entry_price * (1 + config.SL_PNL_PERCENT / lev_factor), 6)
+            else:
+                tp1_price = round(entry_price * (1 - config.TP1_PNL_PERCENT / lev_factor), 6)
+                tp2_price = round(entry_price * (1 - config.TP2_PNL_PERCENT / lev_factor), 6)
+                sl_price = round(entry_price * (1 - config.SL_PNL_PERCENT / lev_factor), 6)
 
-        # --- Update Equity Curve ---
-        # If an exit happened, capital was already updated and appended to equity_curve inside the exit logic.
-        # If no exit happened, or if there were no open positions to check, append current capital.
-        # Because exit_happened is initialized at the start of the loop, this check is now safe.
-        if not exit_happened:
-             equity_curve.append(capital)
+            tp1_notional = round(config.TP1_SIZE_RATIO * notional, 2)
+            tp2_notional = round(notional - tp1_notional, 2)
+
+            # Entry fee on traded notional
+            entry_fee = notional * fee_rate
+            capital -= entry_fee
+
+            open_positions[sig] = {
+                'side': sig,
+                'entry_price': entry_price,
+                'entry_timestamp': ts,
+                'entry_index': idx,
+                'tp1_price': tp1_price,
+                'tp2_price': tp2_price,
+                'sl_price': sl_price,
+                'tp1_size_usd': tp1_notional,
+                'tp2_size_usd': tp2_notional,
+                'remaining_usd': notional,
+                'tp1_filled': False,
+                'status': 'open'
+            }
+            logger.debug(f"[{ts}] Entered {sig} @ {entry_price:.6f}, notional=${notional:.2f}, fee=${entry_fee:.4f}")
+
+        # 3) Mark-to-market equity update using close price of current bar
+        unrealized = 0.0
+        for pos in open_positions.values():
+            if pos['status'] != 'open' or pos['remaining_usd'] <= 0:
+                continue
+            close_price = candle['close']
+            unrealized += _pnl_for(pos['side'], pos['entry_price'], close_price, pos['remaining_usd'])
+
+        equity = capital + unrealized
+        equity_curve.append(equity)
+        peak_equity = max(peak_equity, equity)
+        dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+        max_drawdown = max(max_drawdown, dd)
 
     # --- Finalize ---
     # Close any remaining open positions at the end? (Not typical, but depends on goal)
@@ -285,6 +341,7 @@ def run_backtest(historical_df, initial_capital=100.0, fee_rate=0.001):
     # --- Calculate Final Metrics ---
     final_capital = capital
     total_pnl = final_capital - initial_capital
+
     total_return_percent = (total_pnl / initial_capital) * 100 if initial_capital > 0 else 0
 
     # Win Rate
@@ -297,6 +354,7 @@ def run_backtest(historical_df, initial_capital=100.0, fee_rate=0.001):
     # Sharpe Ratio (Simplified, annualized, assuming 1H candles)
     # Calculate returns for each period (each step in the loop)
     returns = pd.Series(equity_curve).pct_change().dropna()
+
     if len(returns) > 1 and returns.std() != 0:
         # Assuming hourly data for Sharpe (adjust time period factor as needed)
         # Sharpe = (Mean Return - Risk Free Rate) / Std Dev of Return * SQRT(N)

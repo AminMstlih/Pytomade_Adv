@@ -14,7 +14,12 @@ def check_market_conditions(instId):
         return False # Cannot assess conditions without data
 
     try:
-        volume_24h = float(ticker_data.get('volCcy24h', 0))
+        vol_contracts = float(ticker_data.get("vol24h", 0))     # jumlah kontrak
+        last_price = float(ticker_data.get("last", 0))          # harga saat ini
+        ctVal = float(ticker_data.get("ctVal", 1))          # multiplier
+        # asumsinya ctValCcy == baseCcy (misal BTC)
+
+        volume_24h = vol_contracts * ctVal * last_price
         last_price = float(ticker_data.get('last', 0))
         best_bid = float(ticker_data.get('bidPx', 0))
         best_ask = float(ticker_data.get('askPx', 0))

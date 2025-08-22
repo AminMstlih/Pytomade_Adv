@@ -15,7 +15,7 @@ def _ema(series, period):
     """Calculates the Exponential Moving Average."""
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
-def _rsi(series, period=14):
+def _rsi(series, period=1):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=period).mean()
@@ -24,7 +24,7 @@ def _rsi(series, period=14):
     rsi = np.where(np.isnan(rsi), 50, rsi)
     return pd.Series(rsi, index=series.index)
 
-def _stochrsi(series, rsi_length=14, stoch_length=14, k=3, d=3):
+def _stochrsi(series, rsi_length=5, stoch_length=5, k=3, d=3):
     rsi_val = _rsi(series, rsi_length)
     lowest_rsi = rsi_val.rolling(window=stoch_length, min_periods=stoch_length).min()
     highest_rsi = rsi_val.rolling(window=stoch_length, min_periods=stoch_length).max()
@@ -39,6 +39,66 @@ def _atr(high, low, close, period=14):
     tr3 = abs(low - close.shift())
     true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return true_range.rolling(window=period, min_periods=period).mean()
+
+def _rma(series, period):
+    """Wilder's RMA used by many Pine indicators (including ATR)."""
+    return series.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+
+def _atr_rma(high, low, close, period=14):
+    """ATR using Wilder's RMA to better match PineScript behavior."""
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return _rma(tr, period)
+
+def _supertrend(high, low, close, factor=5.5, atr_period=11):
+    """
+    Supertrend calculation adapted from Pine-style logic.
+    Returns (supertrend_series, direction_series) where direction is 1 (up) or -1 (down).
+    """
+    atr = _atr_rma(high, low, close, atr_period)
+    st = pd.Series(np.nan, index=close.index)
+    direction = pd.Series(1, index=close.index)
+
+    first_valid = atr.first_valid_index()
+    if first_valid is None:
+        return st, direction
+
+    upper_band = high + factor * atr
+    lower_band = low - factor * atr
+
+    # Determine integer location of first valid atr
+    try:
+        start_i = int(np.atleast_1d(atr.index.searchsorted(first_valid))[0])
+    except Exception:
+        start_i = 0
+
+    for i in range(start_i, len(close)):
+        if i == 0:
+            direction.iloc[i] = 1 if close.iloc[i] > upper_band.iloc[i] else -1
+            st.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
+            continue
+
+        # carry previous
+        direction.iloc[i] = direction.iloc[i-1]
+        prev_st = st.iloc[i-1]
+
+        # flip conditions
+        if direction.iloc[i-1] == 1:
+            if not pd.isna(prev_st) and close.iloc[i] < prev_st:
+                direction.iloc[i] = -1
+        else:
+            if not pd.isna(prev_st) and close.iloc[i] > prev_st:
+                direction.iloc[i] = 1
+
+        # update supertrend
+        if direction.iloc[i] == 1:
+            st.iloc[i] = max(lower_band.iloc[i], prev_st) if not pd.isna(prev_st) else lower_band.iloc[i]
+        else:
+            st.iloc[i] = min(upper_band.iloc[i], prev_st) if not pd.isna(prev_st) else upper_band.iloc[i]
+
+    return st, direction
 
 def _adx(high, low, close, period=14):
     high = high.bfill().ffill()
@@ -56,7 +116,7 @@ def _adx(high, low, close, period=14):
     adx = dx.rolling(window=period, min_periods=period).mean()
     return adx
 
-def _hurst(series, max_lag=50):
+def _hurst(series, max_lag=20):
     """
     Calculates the Hurst exponent using the Rescaled Range (R/S) method.
     ... (docstring) ...
@@ -128,7 +188,9 @@ def calculate_indicators(df):
         RSI_STOCH_PERIOD,    # RSI period (StochRSI uses this)
         max(STOCH_K_PERIOD, STOCH_D_PERIOD), # Max of Stoch K/D smoothing periods
         ATR_PERIOD,          # ATR period
-        ADX_PERIOD           # ADX period (also uses ATR internally)
+        ADX_PERIOD,          # ADX period (also uses ATR internally)
+        13,                  # SMA(13) used with Supertrend filter
+        11                   # Supertrend ATR default
     )
     # StochRSI also needs data for its RSI calculation and then its own Stoch calculation
     # So, the total lookback for StochRSI is roughly RSI_STOCH_PERIOD + max(STOCH_K_PERIOD, STOCH_D_PERIOD) - 1
@@ -149,20 +211,28 @@ def calculate_indicators(df):
         # Depends on indicator robustness with less data. For now, be strict.
         return None
 
-
     try:
         df["ema_fast"] = _ema(df["close"], MA_FAST_PERIOD)
         df["ema_slow"] = _ema(df["close"], MA_SLOW_PERIOD)
         df["stochrsi_k"], df["stochrsi_d"] = _stochrsi(df["close"], rsi_length=RSI_STOCH_PERIOD, stoch_length=RSI_STOCH_PERIOD, k=STOCH_K_PERIOD, d=STOCH_D_PERIOD)
         df["atr"] = _atr(df["high"], df["low"], df["close"], ATR_PERIOD)
         df["adx"] = _adx(df["high"], df["low"], df["close"], ADX_PERIOD)
-        df["hurst"] = _hurst(df["close"], max_lag=50) # Adjust max_lag if needed
+        df["hurst"] = _hurst(df["close"], max_lag=20) # Adjust max_lag if needed
         df["volume_ema"] = _ema(df["volume"], 5) # Using fixed 5 for volume EMA as in original
+
+        # --- Supertrend suite (from market/supertrend.py logic) ---
+        df["sma13"] = df["close"].rolling(window=13, min_periods=13).mean()
+        st, st_dir = _supertrend(df["high"], df["low"], df["close"], factor=5.5, atr_period=11)
+        df["supertrend"] = st
+        df["st_direction"] = st_dir
+        df["bull_signal"] = (df["close"] > df["supertrend"]) & (df["close"].shift(1) <= df["supertrend"].shift(1))
+        df["bear_signal"] = (df["close"] < df["supertrend"]) & (df["close"].shift(1) >= df["supertrend"].shift(1))
+
         logger.info(f"Indicators calculated for latest row: "
             f"EMA_Fast={df['ema_fast'].iloc[-1]:.6f}, EMA_Slow={df['ema_slow'].iloc[-1]:.6f}, "
             f"StochRSI_K={df['stochrsi_k'].iloc[-1]:.2f}, StochRSI_D={df['stochrsi_d'].iloc[-1]:.2f}, "
-            f"ATR={df['atr'].iloc[-1]:.6f}, ADX={df['adx'].iloc[-1]:.2f}, Hurst={df['hurst'].iloc[-1]:.4f}") # <-- Added Hurst
-
+            f"ATR={df['atr'].iloc[-1]:.6f}, ADX={df['adx'].iloc[-1]:.2f}, Hurst={df['hurst'].iloc[-1]:.4f}, "
+            f"ST={df['supertrend'].iloc[-1]:.6f}, SMA13={df['sma13'].iloc[-1] if not pd.isna(df['sma13'].iloc[-1]) else float('nan'):.6f}")
         return df
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
@@ -179,7 +249,12 @@ def generate_signal(df):
         logger.warning("Insufficient data or DataFrame is None for signal generation.")
         return None
 
-    latest_indicators = df.iloc[-1][["ema_fast", "ema_slow", "stochrsi_k", "stochrsi_d", "adx", "volume_ema", "hurst"]] # <-- Added hurst
+    latest_required = ["supertrend", "sma13"]
+    if any(col not in df.columns for col in latest_required):
+        logger.warning("Required Supertrend columns missing; ensure calculate_indicators() was called.")
+        return None
+    latest_indicators = df.iloc[-1][["supertrend", "sma13"]]
+
     if latest_indicators.isna().any():
         logger.warning("NaN detected in latest indicator values; skipping signal generation.")
         logger.debug(f"Latest indicators with potential NaNs: {latest_indicators.to_dict()}")
@@ -187,29 +262,18 @@ def generate_signal(df):
 
     try:
         latest = df.iloc[-1]
-        prev = df.iloc[-2] if len(df) > 1 else None
+        # Supertrend crossover with SMA(13) filter (as in market/supertrend.py)
+        bull_cond = bool(latest.get('bull_signal', False)) and (latest["close"] >= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
+        bear_cond = bool(latest.get('bear_signal', False)) and (latest["close"] <= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
 
-        ma_long = latest["ema_fast"] > latest["ema_slow"]
-        ma_short = latest["ema_fast"] < latest["ema_slow"]
-        stochrsi_long = latest["stochrsi_k"] > latest["stochrsi_d"]
-        stochrsi_short = latest["stochrsi_k"] < latest["stochrsi_d"]
-        volume_trend = latest['volume'] > VOLUME_THRESHOLD_MULTIPLIER * latest['volume_ema']
-        adx_strong = latest["adx"] > ADX_THRESHOLD
-        stoch_not_overbought = latest["stochrsi_k"] < 90
-        stoch_not_oversold = latest["stochrsi_k"] > 10
-        hurst_trending = latest["hurst"] > 0.2
-        hurst_mean_reverting = latest["hurst"] < 0.175
+        signal = "long" if bull_cond else "short" if bear_cond else None
 
-        signal = None
-        if (ma_long and stochrsi_long and volume_trend and stoch_not_overbought and adx_strong and hurst_trending):
-            signal = "long"
-        elif (ma_short and stochrsi_short and volume_trend and stoch_not_oversold and adx_strong and hurst_mean_reverting):
-            signal = "short"
-
-        logger.info(f"Signal check for {df.iloc[-1]['timestamp'] if 'timestamp' in df.columns else 'N/A'}: "
-            f"EMA_L={ma_long}, EMA_S={ma_short}, SRSI_L={stochrsi_long}, SRSI_S={stochrsi_short}, "
-            f"Vol_OK={volume_trend}, ADX_OK={adx_strong}, SRSI_NB={stoch_not_overbought}, SRSI_NS={stoch_not_oversold}, "
-            f"H_Trend={hurst_trending}, H_Revert={hurst_mean_reverting} -> Signal={signal}") # <-- Added H_Trend
+        logger.info(
+            f"ST Signal check for {df.iloc[-1]['timestamp'] if 'timestamp' in df.columns else 'N/A'}: "
+            f"Bull={bull_cond}, Bear={bear_cond}, Close={latest['close']:.6f}, "
+            f"ST={latest['supertrend'] if not pd.isna(latest['supertrend']) else float('nan'):.6f}, "
+            f"SMA13={latest['sma13'] if not pd.isna(latest['sma13']) else float('nan'):.6f} -> Signal={signal}"
+        )
         return signal
     except Exception as e:
         logger.error(f"Error generating signal: {e}")

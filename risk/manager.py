@@ -101,10 +101,10 @@ def calculate_position_details(signal, entry_price, leverage=LEVERAGE):
         sl_price = round(sl_price, 5)
 
         # 4. Calculate sizes for TP1 and TP2 (in USDT)
-        tp1_size_usdt = round(TP1_SIZE_RATIO * size_usdt, 0) # Round to 2 decimal places for USDT
-        tp2_size_usdt = round((1 - TP1_SIZE_RATIO) * size_usdt, 0)
+        tp1_size_usdt = round(TP1_SIZE_RATIO * size_usdt, 2) # Round to 2 decimal places for USDT
+        tp2_size_usdt = round((1 - TP1_SIZE_RATIO) * size_usdt, 2)
         # SL size is typically the full position size for the main order
-        sl_size_usdt = round(size_usdt, 0)
+        sl_size_usdt = round(size_usdt, 2)
 
         # 5. Determine order sides
         order_side = "buy" if signal == "long" else "sell"

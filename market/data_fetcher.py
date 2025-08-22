@@ -13,7 +13,7 @@ def get_ticker(instId):
         logger.error(f"Failed to fetch ticker for {instId}: {response.get('msg', 'Unknown error')} (code: {response.get('code', 'N/A')})")
         return None
 
-def get_historical_candles(instId, bar="1m", limit=100):
+def get_historical_candles(instId, bar="1m", limit=1000):
     """
     Fetches historical candle data.
     Returns a pandas DataFrame or None on failure.
