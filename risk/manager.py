@@ -34,6 +34,7 @@ def check_unified_account():
     else:
         logger.error(f"Failed to check account mode: {response.get('msg', 'Unknown error')} (code: {response.get('code', 'N/A')})")
         return False
+        
 
 def set_leverage(instId, leverage, mgnMode="cross"):
     """Sets the leverage for an instrument."""

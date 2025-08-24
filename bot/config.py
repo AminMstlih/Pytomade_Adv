@@ -11,9 +11,9 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 OKX_BASE_URL = "https://www.okx.com"
 
 # --- Trading Parameters ---
-INSTRUMENT = "BTC-USDT-SWAP" # Change this for different pairs
+INSTRUMENT = "DOGE-USDT-SWAP" # Change this for different pairs
 LEVERAGE = 15
-TARGET_MARGIN_USD = 1       # Key for small balance trading
+TARGET_MARGIN_USD = 0.5       # Key for small balance trading
 MAX_POSITION_SIZE_USDT = 10000
 
 # --- Risk Management ---
@@ -35,7 +35,7 @@ TRAILING_STOP_CHECK_INTERVAL_SECONDS = 60
 
 # --- Market Filters ---
 MIN_24H_VOLUME_USDT = 1000000
-MAX_SPREAD_PERCENT = 0.1      # 0.1%
+MAX_SPREAD_PERCENT = 0.2      # 0.1%
 MIN_VOLATILITY_PERCENT = 0.2  # 0.2%
 
 # --- Strategy Parameters ---

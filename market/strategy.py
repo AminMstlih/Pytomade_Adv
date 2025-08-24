@@ -12,16 +12,24 @@ from bot.logger_config import logger
 # --- Indicator Calculation Functions ---
 # (These helper functions remain the same as before)
 def _ema(series, period):
-    """Calculates the Exponential Moving Average."""
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
-def _rsi(series, period=1):
+def _rsi(series, period=14):  # Updated default to 14 for standard alignment
+    """
+    Calculates RSI using Wilder's method to match TradingView/OKX.
+    Uses EMA-like smoothing (ewm with com=period-1) after initial SMA seed.
+    """
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=period).mean()
-    rs = np.where(loss == 0, 0, gain / loss)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    # Use ewm with com=period-1 (alpha=1/period) and min_periods=period to seed with SMA
+    avg_gain = gain.ewm(com=period-1, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(com=period-1, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(np.isnan(rsi), 50, rsi)
+    rsi = rsi.fillna(50)  # Fill NaNs with 50 (neutral) for early periods
     return pd.Series(rsi, index=series.index)
 
 def _stochrsi(series, rsi_length=5, stoch_length=5, k=3, d=3):
