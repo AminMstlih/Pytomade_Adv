@@ -166,7 +166,7 @@ def place_order(instId, details):
 
         if response["code"] == "0" and response["data"]:
             ord_id = response["data"][0]["ordId"]
-            logger.info(f"✅ Order placed successfully for {instId}: ordId={ord_id}")
+            logger.info(f"Order placed successfully for {instId}: ordId={ord_id}")
             return {
                 "ordId": ord_id,
                 "size_contracts": size_in_contracts,
@@ -175,7 +175,7 @@ def place_order(instId, details):
                 "pos_side": details["pos_side"]
             }
         else:
-            logger.error(f"❌ Order placement failed for {instId}: {response.get('msg', 'Unknown error')} "
+            logger.error(f"Order placement failed for {instId}: {response.get('msg', 'Unknown error')} "
                         f"(code: {response.get('code', 'N/A')})")
             
             if response.get("data") and isinstance(response["data"], list) and len(response["data"]) > 0:
@@ -233,8 +233,7 @@ def place_trailing_stop(instId, entry_price, pos_size_contracts, activation_pnl_
             "posSide": position_side,
             "ordType": "move_order_stop",
             "sz": format_contract_size(pos_size_contracts, lot_size),
-            "activePx": str(active_px),
-            "reduceOnly": "true"  # Added to prevent over-closing if position shrinks
+            "activePx": str(active_px)
         }
         
         if callback_type == "percent":
@@ -251,12 +250,12 @@ def place_trailing_stop(instId, entry_price, pos_size_contracts, activation_pnl_
 
         if response and response.get("code") == "0":
             algo_id = response.get("data", [{}])[0].get("algoId")
-            logger.info(f"✅ Trailing stop placed successfully: AlgoId: {algo_id}")
+            logger.info(f"Trailing stop placed successfully: AlgoId: {algo_id}")
             return response
         else:
             error_msg = response.get("msg", "Unknown error")
             error_code = response.get("code", "N/A")
-            logger.error(f"❌ Trailing stop failed: {error_msg} (code: {error_code})")
+            logger.error(f"Trailing stop failed: {error_msg} (code: {error_code})")
             
             if response.get("data") and isinstance(response["data"], list) and len(response["data"]) > 0:
                 s_msg = response["data"][0].get("sMsg", "")
@@ -356,12 +355,12 @@ def cleanup_orphan_trailing(instId, posSide):
         response = post_private_data("/api/v5/trade/cancel-algo-order", cancel_payload)
 
         if response.get("code") == "0":
-            logger.info(f"✅ Orphan trailing stops canceled successfully for {instId} ({posSide}).")
+            logger.info(f"Orphan trailing stops canceled successfully for {instId} ({posSide}).")
             return True
         else:
             error_msg = response.get("msg", "Unknown error")
             error_code = response.get("code", "N/A")
-            logger.error(f"❌ Cleanup failed: {error_msg} (code: {error_code})")
+            logger.error(f"Cleanup failed: {error_msg} (code: {error_code})")
             if response.get("data"):
                 for item in response["data"]:
                     if item.get("sCode") != "0":

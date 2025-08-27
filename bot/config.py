@@ -11,21 +11,21 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 OKX_BASE_URL = "https://www.okx.com"
 
 # --- Trading Parameters ---
-INSTRUMENT = "DOGE-USDT-SWAP" # Change this for different pairs
+INSTRUMENT = "SOL-USDT-SWAP" # Change this for different pairs
 LEVERAGE = 15
 TARGET_MARGIN_USD = 0.5       # Key for small balance trading
 MAX_POSITION_SIZE_USDT = 10000
 
 # --- Risk Management ---
-TP1_PNL_PERCENT = 21.0         # 15% PNL for TP1
-TP2_PNL_PERCENT = 57.0         # 21% PNL for TP2
-TP1_SIZE_RATIO = 0.50           # 50% of position size for TP1       
-SL_PNL_PERCENT = -21.0         # -21% PNL for SL
+TP1_PNL_PERCENT = 15.0         # 15% PNL for TP1
+TP2_PNL_PERCENT = 21.0         # 27% PNL for TP2
+TP1_SIZE_RATIO = 0.75           # 50% of position size for TP1       
+SL_PNL_PERCENT = -15.0         # -21% PNL for SL
 
 # --- Trailing Stop Parameters ---
 USE_TRAILING_STOP_WITH_FIXED_SL = True
 # Aktifkan trailing stop setelah posisi mencapai profit ini (%)
-TRAILING_STOP_ACTIVATION_PNL_PERCENT = 0.05 
+TRAILING_STOP_ACTIVATION_PNL_PERCENT = 0.2       # 5% pnl
 # Jarak trailing stop dari harga tertinggi/terendah (%)
 TRAILING_STOP_CALLBACK_RATIO_PERCENT = 0.01  
 # Tipe callback: 'percent' atau 'constant' (kita gunakan 'percent')

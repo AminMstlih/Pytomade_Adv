@@ -60,7 +60,7 @@ def _atr_rma(high, low, close, period=14):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return _rma(tr, period)
 
-def _supertrend(high, low, close, factor=5.5, atr_period=11):
+def _supertrend(high, low, close, factor=2, atr_period=15):
     """
     Supertrend calculation adapted from Pine-style logic.
     Returns (supertrend_series, direction_series) where direction is 1 (up) or -1 (down).
@@ -226,11 +226,11 @@ def calculate_indicators(df):
         df["atr"] = _atr(df["high"], df["low"], df["close"], ATR_PERIOD)
         df["adx"] = _adx(df["high"], df["low"], df["close"], ADX_PERIOD)
         df["hurst"] = _hurst(df["close"], max_lag=20) # Adjust max_lag if needed
-        df["volume_ema"] = _ema(df["volume"], 5) # Using fixed 5 for volume EMA as in original
+        df["volume_ema"] = _ema(df["volume"], 5) # Using fixed 5 for volume EMA as in originally intended
 
         # --- Supertrend suite (from market/supertrend.py logic) ---
         df["sma13"] = df["close"].rolling(window=13, min_periods=13).mean()
-        st, st_dir = _supertrend(df["high"], df["low"], df["close"], factor=5.5, atr_period=11)
+        st, st_dir = _supertrend(df["high"], df["low"], df["close"], factor=2, atr_period=15)
         df["supertrend"] = st
         df["st_direction"] = st_dir
         df["bull_signal"] = (df["close"] > df["supertrend"]) & (df["close"].shift(1) <= df["supertrend"].shift(1))
