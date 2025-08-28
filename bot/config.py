@@ -11,23 +11,26 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 OKX_BASE_URL = "https://www.okx.com"
 
 # --- Trading Parameters ---
-INSTRUMENT = "SOL-USDT-SWAP" # Change this for different pairs
-LEVERAGE = 15
+INSTRUMENT = "ETH-USDT-SWAP" # Change this for different pairs
+LEVERAGE = 51
 TARGET_MARGIN_USD = 0.5       # Key for small balance trading
 MAX_POSITION_SIZE_USDT = 10000
 
+# Trade mode: "hedge" to keep opposite positions, "close" to close them before new trades
+TRADE_MODE = "close"  # or "hedge"
+
 # --- Risk Management ---
-TP1_PNL_PERCENT = 15.0         # 15% PNL for TP1
-TP2_PNL_PERCENT = 21.0         # 27% PNL for TP2
+TP1_PNL_PERCENT = 150.0         # 15% PNL for TP1
+TP2_PNL_PERCENT = 210.0         # 27% PNL for TP2
 TP1_SIZE_RATIO = 0.75           # 50% of position size for TP1       
 SL_PNL_PERCENT = -15.0         # -21% PNL for SL
 
 # --- Trailing Stop Parameters ---
-USE_TRAILING_STOP_WITH_FIXED_SL = True
+USE_TRAILING_STOP_WITH_FIXED_SL = False
 # Aktifkan trailing stop setelah posisi mencapai profit ini (%)
-TRAILING_STOP_ACTIVATION_PNL_PERCENT = 0.2       # 5% pnl
+TRAILING_STOP_ACTIVATION_PNL_PERCENT = 0.15       # 5% pnl
 # Jarak trailing stop dari harga tertinggi/terendah (%)
-TRAILING_STOP_CALLBACK_RATIO_PERCENT = 0.01  
+TRAILING_STOP_CALLBACK_RATIO_PERCENT = 0.007  
 # Tipe callback: 'percent' atau 'constant' (kita gunakan 'percent')
 TRAILING_STOP_CALLBACK_TYPE = "percent" 
 # Interval (detik) untuk memeriksa dan memasang trailing stop (jika diperlukan)

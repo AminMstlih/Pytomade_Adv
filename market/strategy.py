@@ -230,7 +230,7 @@ def calculate_indicators(df):
 
         # --- Supertrend suite (from market/supertrend.py logic) ---
         df["sma13"] = df["close"].rolling(window=13, min_periods=13).mean()
-        st, st_dir = _supertrend(df["high"], df["low"], df["close"], factor=2, atr_period=15)
+        st, st_dir = _supertrend(df["high"], df["low"], df["close"], factor=int(2), atr_period=15)
         df["supertrend"] = st
         df["st_direction"] = st_dir
         df["bull_signal"] = (df["close"] > df["supertrend"]) & (df["close"].shift(1) <= df["supertrend"].shift(1))
@@ -270,11 +270,16 @@ def generate_signal(df):
 
     try:
         latest = df.iloc[-1]
+
+        ma_long = latest["ema_fast"] > latest["ema_slow"]
+        ma_short = latest["ema_fast"] < latest["ema_slow"]
         # Supertrend crossover with SMA(13) filter (as in market/supertrend.py)
         bull_cond = bool(latest.get('bull_signal', False)) and (latest["close"] >= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
         bear_cond = bool(latest.get('bear_signal', False)) and (latest["close"] <= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
 
-        signal = "long" if bull_cond else "short" if bear_cond else None
+        signal = "long" if ma_long else "short" if ma_short else None
+
+        #signal = "long" if bull_cond else "short" if bear_cond else None
 
         logger.info(
             f"ST Signal check for {df.iloc[-1]['timestamp'] if 'timestamp' in df.columns else 'N/A'}: "

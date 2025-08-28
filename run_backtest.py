@@ -36,7 +36,7 @@ def main():
         # Fetch a reasonable amount of historical 1-hour data for backtesting
         # Adjust 'bar' and 'limit' as needed. OKX has limits (e.g., 100 for 1H).
         # You might need to fetch multiple batches for longer history.
-        historical_df = get_historical_candles(config.INSTRUMENT, bar="1H", limit=300)
+        historical_df = get_historical_candles(config.INSTRUMENT, bar="1m", limit=500)
         # Optional: Save fetched data to CSV for future use
         # if historical_df is not None and not historical_df.empty:
         #     historical_df.to_csv(csv_file_path, index=False)
