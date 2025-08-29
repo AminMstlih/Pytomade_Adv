@@ -26,7 +26,7 @@ TP1_SIZE_RATIO = 0.75           # 50% of position size for TP1
 SL_PNL_PERCENT = -15.0         # -21% PNL for SL
 
 # --- Trailing Stop Parameters ---
-USE_TRAILING_STOP_WITH_FIXED_SL = False               
+USE_TRAILING_STOP = False               
 TRAILING_STOP_ACTIVATION_PNL_PERCENT = 0.15           # Aktifkan trailing stop setelah posisi mencapai profit ini (%)
 TRAILING_STOP_CALLBACK_RATIO_PERCENT = 0.007          # 5% pnl Jarak trailing stop dari harga tertinggi/terendah (%)
 TRAILING_STOP_CALLBACK_TYPE = "percent"               # Tipe callback: 'percent' atau 'constant' (kita gunakan 'percent')

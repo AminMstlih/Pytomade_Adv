@@ -129,10 +129,8 @@ def run():
                     set_last_signal(signal)
                     set_last_trade_time(time.time())
 
-                    # Trailing Stop Logic
-                    if hasattr(config, 'TRAILING_STOP_ACTIVATION_PNL_PERCENT') and \
-                       config.TRAILING_STOP_ACTIVATION_PNL_PERCENT > 0:
-                        
+                    # Trailing Stop Logic (only if enabled)
+                    if config.USE_TRAILING_STOP:
                         entry_price_for_ts = order_result.get('entry_price')
                         size_for_ts = order_result.get('size_contracts', 0)
                         pos_side_for_ts = order_result.get('pos_side')

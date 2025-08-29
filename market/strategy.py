@@ -12,9 +12,10 @@ from bot.logger_config import logger
 # --- Indicator Calculation Functions ---
 # (These helper functions remain the same as before)
 def _ema(series, period):
+    """Calculate Exponential Moving Average."""
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
-def _rsi(series, period=14):  # Updated default to 14 for standard alignment
+def _rsi(series, period=14):
     """
     Calculates RSI using Wilder's method to match TradingView/OKX.
     Uses EMA-like smoothing (ewm with com=period-1) after initial SMA seed.
@@ -27,25 +28,39 @@ def _rsi(series, period=14):  # Updated default to 14 for standard alignment
     avg_gain = gain.ewm(com=period-1, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(com=period-1, min_periods=period, adjust=False).mean()
     
-    rs = avg_gain / avg_loss
+    # Avoid division by zero
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.fillna(50)  # Fill NaNs with 50 (neutral) for early periods
     return pd.Series(rsi, index=series.index)
 
 def _stochrsi(series, rsi_length=5, stoch_length=5, k=3, d=3):
+    """Calculate StochRSI indicator."""
     rsi_val = _rsi(series, rsi_length)
     lowest_rsi = rsi_val.rolling(window=stoch_length, min_periods=stoch_length).min()
     highest_rsi = rsi_val.rolling(window=stoch_length, min_periods=stoch_length).max()
-    stoch_k = np.where(highest_rsi == lowest_rsi, 50, 100 * (rsi_val - lowest_rsi) / (highest_rsi - lowest_rsi))
+    
+    # Handle cases where highest_rsi equals lowest_rsi
+    stoch_k = np.where(
+        highest_rsi == lowest_rsi, 
+        50, 
+        100 * (rsi_val - lowest_rsi) / (highest_rsi - lowest_rsi)
+    )
+    
     stoch_d = pd.Series(stoch_k, index=series.index).rolling(window=d, min_periods=d).mean()
     stoch_d = stoch_d.bfill().ffill()
     return pd.Series(stoch_k, index=series.index), stoch_d
 
-def _atr(high, low, close, period=14):
+def _true_range(high, low, close):
+    """Calculate True Range for ATR."""
     tr1 = high - low
     tr2 = abs(high - close.shift())
     tr3 = abs(low - close.shift())
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+def _atr(high, low, close, period=14):
+    """Calculate Average True Range using simple moving average."""
+    true_range = _true_range(high, low, close)
     return true_range.rolling(window=period, min_periods=period).mean()
 
 def _rma(series, period):
@@ -54,10 +69,7 @@ def _rma(series, period):
 
 def _atr_rma(high, low, close, period=14):
     """ATR using Wilder's RMA to better match PineScript behavior."""
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr = _true_range(high, low, close)
     return _rma(tr, period)
 
 def _supertrend(high, low, close, factor=2, atr_period=15):
@@ -73,42 +85,54 @@ def _supertrend(high, low, close, factor=2, atr_period=15):
     if first_valid is None:
         return st, direction
 
-    upper_band = high + factor * atr
-    lower_band = low - factor * atr
+    upper_band = (high + factor * atr).ffill()
+    lower_band = (low - factor * atr).ffill()
 
-    # Determine integer location of first valid atr
-    try:
-        start_i = int(np.atleast_1d(atr.index.searchsorted(first_valid))[0])
-    except Exception:
-        start_i = 0
-
-    for i in range(start_i, len(close)):
-        if i == 0:
-            direction.iloc[i] = 1 if close.iloc[i] > upper_band.iloc[i] else -1
-            st.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
-            continue
-
-        # carry previous
-        direction.iloc[i] = direction.iloc[i-1]
-        prev_st = st.iloc[i-1]
-
-        # flip conditions
-        if direction.iloc[i-1] == 1:
-            if not pd.isna(prev_st) and close.iloc[i] < prev_st:
-                direction.iloc[i] = -1
+    # Vectorized implementation for better performance
+    close_arr = close.values
+    upper_band_arr = upper_band.values
+    lower_band_arr = lower_band.values
+    st_arr = np.full(len(close_arr), np.nan)
+    direction_arr = np.ones(len(close_arr))
+    
+    # Find the starting index
+    start_idx = close.index.get_loc(first_valid)
+    
+    # Initialize first value
+    if start_idx < len(close_arr):
+        direction_arr[start_idx] = 1 if close_arr[start_idx] > upper_band_arr[start_idx] else -1
+        st_arr[start_idx] = lower_band_arr[start_idx] if direction_arr[start_idx] == 1 else upper_band_arr[start_idx]
+    
+    # Process the rest of the values
+    for i in range(start_idx + 1, len(close_arr)):
+        direction_arr[i] = direction_arr[i-1]
+        prev_st = st_arr[i-1]
+        
+        if not np.isnan(prev_st):
+            # Flip conditions
+            if direction_arr[i-1] == 1:
+                if close_arr[i] < prev_st:
+                    direction_arr[i] = -1
+            else:
+                if close_arr[i] > prev_st:
+                    direction_arr[i] = 1
+            
+            # Update supertrend
+            if direction_arr[i] == 1:
+                st_arr[i] = max(lower_band_arr[i], prev_st)
+            else:
+                st_arr[i] = min(upper_band_arr[i], prev_st)
         else:
-            if not pd.isna(prev_st) and close.iloc[i] > prev_st:
-                direction.iloc[i] = 1
-
-        # update supertrend
-        if direction.iloc[i] == 1:
-            st.iloc[i] = max(lower_band.iloc[i], prev_st) if not pd.isna(prev_st) else lower_band.iloc[i]
-        else:
-            st.iloc[i] = min(upper_band.iloc[i], prev_st) if not pd.isna(prev_st) else upper_band.iloc[i]
-
-    return st, direction
+            # Handle case where previous ST is NaN
+            if direction_arr[i] == 1:
+                st_arr[i] = lower_band_arr[i]
+            else:
+                st_arr[i] = upper_band_arr[i]
+    
+    return pd.Series(st_arr, index=close.index), pd.Series(direction_arr, index=close.index)
 
 def _adx(high, low, close, period=14):
+    """Calculate Average Directional Index."""
     high = high.bfill().ffill()
     low = low.bfill().ffill()
     close = close.bfill().ffill()
@@ -117,69 +141,90 @@ def _adx(high, low, close, period=14):
     minus_dm = -low.diff()
     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
     minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
     tr = _atr(high, low, close, period)
-    plus_di = 100 * plus_dm.rolling(window=period, min_periods=period).mean() / tr.where(tr != 0, np.nan)
-    minus_di = 100 * minus_dm.rolling(window=period, min_periods=period).mean() / tr.where(tr != 0, np.nan)
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).where((plus_di + minus_di) != 0, np.nan)
+    
+    # Avoid division by zero
+    tr_nonzero = tr.replace(0, np.nan)
+    plus_di = 100 * plus_dm.rolling(window=period, min_periods=period).mean() / tr_nonzero
+    minus_di = 100 * minus_dm.rolling(window=period, min_periods=period).mean() / tr_nonzero
+    
+    # Handle cases where both DIs are zero
+    di_sum = plus_di + minus_di
+    dx = 100 * abs(plus_di - minus_di) / di_sum.replace(0, np.nan)
     adx = dx.rolling(window=period, min_periods=period).mean()
+    
     return adx
 
-def _hurst(series, max_lag=20):
+def _hurst(close_series, length=64):
     """
-    Calculates the Hurst exponent using the Rescaled Range (R/S) method.
-    ... (docstring) ...
+    Calculates the Hurst Exponent exactly like QuantNomad's TradingView indicator.
+    
+    Parameters:
+    close_series (pd.Series): Close prices
+    length (int): Lookback period for calculation
+    
+    Returns:
+    float: Hurst exponent value
     """
     try:
-        ts = series.dropna()
-        if len(ts) < max_lag * 2:
-            return np.nan
+        if len(close_series) < length + 1:
+            return 0.5  # Neutral value if not enough data
             
-        lags = range(2, min(max_lag, len(ts) // 2))
-        # Calculate tau: standard deviation of price differences
-        tau = [np.sqrt(np.std(ts.diff(lag).dropna())) for lag in lags]
-        # --- Fix 1: Safer filtering of tau ---
-        # Filter out non-positive values and non-numeric/NaN values *safely*
-        filtered_tau_lags = [
-            (tau[i], lags[i]) for i in range(len(tau))
-            if isinstance(tau[i], (int, float)) and # Check if tau[i] is a number
-               not math.isnan(tau[i]) and          # Check if it's not NaN
-               tau[i] > 0                           # Check if it's positive
-        ]
-        if not filtered_tau_lags or len(filtered_tau_lags) < 3:
-            return np.nan # Need at least 3 points for regression
-
-        # Unpack the filtered lists
-        tau_filtered, lags_filtered = zip(*filtered_tau_lags) # This might be the line Pylance dislikes
-        # Convert back to lists if needed, though linregress can often handle tuples/arrays
-        # tau_filtered = list(tau_filtered)
-        # lags_filtered = list(lags_filtered)
-
-        # --- Fix 2: Ensure inputs to linregress are clean ---
-        # Log-log plot: log(tau) vs log(lag)
-        # Add small epsilon to avoid log(0) if somehow values are zero (shouldn't be with > 0 check)
-        epsilon = 1e-10
-        log_lags = np.log(np.array(lags_filtered) + epsilon)
-        log_tau = np.log(np.array(tau_filtered) + epsilon)
-
-        # --- Fix 3: Check for valid data before regression ---
-        if len(log_lags) < 3 or np.any(~np.isfinite(log_lags)) or np.any(~np.isfinite(log_tau)):
-             return np.nan # Invalid data for regression
-
+        # Initialize arrays to store Hurst values
+        hurst_values = np.full(len(close_series), np.nan)
         
-        # Perform linear regression
-        slope, intercept, r_value, p_value, std_err = linregress(log_lags, log_tau)
+        # Calculate for each point in the series
+        for i in range(length, len(close_series)):
+            # Get the window of close prices
+            window = close_series.iloc[i-length:i+1]
+            
+            # Calculate P&L (percentage change)
+            pnl = window / window.shift(1) - 1
+            pnl = pnl.dropna()  # Remove the first NaN
+            
+            # Calculate mean P&L
+            mean_pnl = pnl.mean()
+            
+            # Initialize variables for cumulative calculation
+            cum = 0.0
+            cum_min = float('inf')
+            cum_max = float('-inf')
+            
+            # Calculate cumulative deviation and find min/max
+            for pnl_val in pnl:
+                cum += pnl_val - mean_pnl
+                cum_min = min(cum_min, cum)
+                cum_max = max(cum_max, cum)
+            
+            # Calculate standard deviation
+            dev_sum = 0.0
+            for pnl_val in pnl:
+                dev = pnl_val - mean_pnl
+                dev_sum += dev * dev
+                
+            sd = math.sqrt(dev_sum / (length - 1)) if length > 1 else 0
+            
+            # Calculate R/S
+            if sd == 0:
+                hurst_values[i] = 0.5  # Avoid division by zero
+                continue
+                
+            rs = (cum_max - cum_min) / sd
+            
+            # Calculate Hurst Exponent
+            if rs <= 0:
+                hurst_values[i] = 0.5  # Avoid log of non-positive number
+                continue
+                
+            hurst_values[i] = math.log(rs) / math.log(length)
         
-        # --- Fix 4: Safer check for hurst_exp ---
-        # Hurst exponent is the slope of the log-log plot
-        hurst_exp = slope
-        # Check if hurst_exp is a valid number before returning
-        if isinstance(hurst_exp, (int, float)) and not math.isnan(hurst_exp):
-            return hurst_exp
-        else:
-            return np.nan # Return NaN if slope is somehow invalid
+        return hurst_values
+        
     except Exception as e:
-        # print(f"Hurst calculation error: {e}") # Optional debug print
-        return np.nan # Return NaN on any error
+        logger.debug(f"Hurst calculation error: {e}")
+        # Return array of neutral values on error
+        return np.full(len(close_series), 0.5)
 
 # --- Main Strategy Functions ---
 
@@ -225,7 +270,7 @@ def calculate_indicators(df):
         df["stochrsi_k"], df["stochrsi_d"] = _stochrsi(df["close"], rsi_length=RSI_STOCH_PERIOD, stoch_length=RSI_STOCH_PERIOD, k=STOCH_K_PERIOD, d=STOCH_D_PERIOD)
         df["atr"] = _atr(df["high"], df["low"], df["close"], ATR_PERIOD)
         df["adx"] = _adx(df["high"], df["low"], df["close"], ADX_PERIOD)
-        df["hurst"] = _hurst(df["close"], max_lag=20) # Adjust max_lag if needed
+        df["hurst"] = _hurst(df["close"], length=51) # Adjust max_lag if needed
         df["volume_ema"] = _ema(df["volume"], 5) # Using fixed 5 for volume EMA as in originally intended
 
         # --- Supertrend suite (from market/supertrend.py logic) ---
@@ -277,8 +322,8 @@ def generate_signal(df):
         bull_cond = bool(latest.get('bull_signal', False)) and (latest["close"] >= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
         bear_cond = bool(latest.get('bear_signal', False)) and (latest["close"] <= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
 
-        signal = "long" if ma_long else "short" if ma_short else None
-
+        #signal = "long" if ma_long else "short" if ma_short else None
+        signal = None
         #signal = "long" if bull_cond else "short" if bear_cond else None
 
         logger.info(
