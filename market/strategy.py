@@ -278,8 +278,8 @@ def calculate_indicators(df):
         st, st_dir = _supertrend(df["high"], df["low"], df["close"], factor=int(2), atr_period=15)
         df["supertrend"] = st
         df["st_direction"] = st_dir
-        df["bull_signal"] = (df["close"] > df["supertrend"]) & (df["close"].shift(1) <= df["supertrend"].shift(1))
-        df["bear_signal"] = (df["close"] < df["supertrend"]) & (df["close"].shift(1) >= df["supertrend"].shift(1))
+        df["bull_signal"] = (df["close"] > df["supertrend"])
+        df["bear_signal"] = (df["close"] < df["supertrend"])
 
         logger.info(f"Indicators calculated for latest row: "
             f"EMA_Fast={df['ema_fast'].iloc[-1]:.6f}, EMA_Slow={df['ema_slow'].iloc[-1]:.6f}, "
@@ -318,18 +318,23 @@ def generate_signal(df):
 
         ma_long = latest["ema_fast"] > latest["ema_slow"]
         ma_short = latest["ema_fast"] < latest["ema_slow"]
+        hurst_trend = latest["hurst"] > 0.515
+        hurst_revert = latest["hurst"] < 0.485
         # Supertrend crossover with SMA(13) filter (as in market/supertrend.py)
         bull_cond = bool(latest.get('bull_signal', False)) and (latest["close"] >= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
         bear_cond = bool(latest.get('bear_signal', False)) and (latest["close"] <= latest["sma13"] if not pd.isna(latest["sma13"]) else False)
 
-        #signal = "long" if ma_long else "short" if ma_short else None
         signal = None
-        #signal = "long" if bull_cond else "short" if bear_cond else None
+        if ma_long :
+            signal = "long"
+        elif ma_short :
+            signal = "short"
 
         logger.info(
             f"ST Signal check for {df.iloc[-1]['timestamp'] if 'timestamp' in df.columns else 'N/A'}: "
             f"Bull={bull_cond}, Bear={bear_cond}, Close={latest['close']:.6f}, "
             f"ST={latest['supertrend'] if not pd.isna(latest['supertrend']) else float('nan'):.6f}, "
+            f"H_Trend={hurst_trend}, H_Revert={hurst_revert}, "
             f"SMA13={latest['sma13'] if not pd.isna(latest['sma13']) else float('nan'):.6f} -> Signal={signal}"
         )
         return signal

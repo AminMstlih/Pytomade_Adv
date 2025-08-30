@@ -11,8 +11,8 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE")
 OKX_BASE_URL = "https://www.okx.com"
 
 # --- Trading Parameters ---
-INSTRUMENT = "ETH-USDT-SWAP" # Change this for different pairs
-LEVERAGE = 51
+INSTRUMENT = "DOGE-USDT-SWAP" # Change this for different pairs
+LEVERAGE = 15
 TARGET_MARGIN_USD = 0.5       # Key for small balance trading
 MAX_POSITION_SIZE_USDT = 10000
 
@@ -23,7 +23,7 @@ TRADE_MODE = "close"  # or "hedge"
 TP1_PNL_PERCENT = 150.0         # 15% PNL for TP1
 TP2_PNL_PERCENT = 210.0         # 27% PNL for TP2
 TP1_SIZE_RATIO = 0.75           # 50% of position size for TP1       
-SL_PNL_PERCENT = -15.0         # -21% PNL for SL
+SL_PNL_PERCENT = -21.0         # -21% PNL for SL
 
 # --- Trailing Stop Parameters ---
 USE_TRAILING_STOP = False               
@@ -38,8 +38,8 @@ MAX_SPREAD_PERCENT = 0.2      # 0.1%
 MIN_VOLATILITY_PERCENT = 0.2  # 0.2%
 
 # --- Strategy Parameters ---
-MA_FAST_PERIOD = 21
-MA_SLOW_PERIOD = 22
+MA_FAST_PERIOD = 13
+MA_SLOW_PERIOD = 21
 RSI_STOCH_PERIOD = 5
 STOCH_K_PERIOD = 3
 STOCH_D_PERIOD = 3
